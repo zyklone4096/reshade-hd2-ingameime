@@ -2,9 +2,9 @@
 
 《绝地潜兵2》中文输入支持
 
-## 免责声明
+## 警告
 
-《Helldivers 2》是一款多人游戏，设有反作弊机制。此实现通过 ReShade 加载外部 DLL，可能会导致反作弊检测。
+《Helldivers 2》是一款多人游戏，设有反作弊机制。此实现通过 ReShade 加载外部 DLL，可能会导致反作弊检测。原作者不对由此导致的任何后果负责。
 
 如果你不想承担此风险，建议使用 [GRW-CNChat](https://github.com/GameXueRen/GRW-CNChat/)。
 
