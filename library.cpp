@@ -81,6 +81,15 @@ static void SetImeEnabled(HWND hwnd, bool enabled) {
         return;
     }
 
+    if (enabled) {
+        DWORD conversion = 0;
+        DWORD sentence = 0;
+        if (ImmGetConversionStatus(context, &conversion, &sentence)) {
+            conversion |= IME_CMODE_NATIVE;
+            ImmSetConversionStatus(context, conversion, sentence);
+        }
+    }
+
     ImmSetOpenStatus(context, enabled ? TRUE : FALSE);
     ImmReleaseContext(hwnd, context);
     g_ImeOpen = enabled;
@@ -119,6 +128,9 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     switch (msg) {
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
+            if ((lParam & (1UL << 30)) != 0)
+                break;
+
             if (wParam == VK_RETURN) {
                 return HandleEnterKey(hwnd, msg, wParam, lParam);
             }
