@@ -24,19 +24,31 @@ static HWND g_hWnd = nullptr;
 static WNDPROC g_OriginalWndProc = nullptr;
 static bool g_InputMode = false;
 static bool g_ImeOpen = false;
+static bool g_PendingSubmitOnEnterUp = false;
 static std::wstring g_LastResultText;
+static std::wstring g_PendingSubmitText;
+constexpr UINT WM_APP_SUBMIT_TEXT = WM_APP + 1;
 
 static void SetImeEnabled(HWND hwnd, bool enabled);
 static void SetInputMode(HWND hwnd, bool enabled);
 
-static void SubmitResultText(HWND hwnd) {
-    const std::wstring text = g_LastResultText;
+static void QueueSubmitResultText(HWND hwnd) {
+    g_PendingSubmitText = g_LastResultText;
     g_LastResultText.clear();
 
-    if (text.empty() || GetForegroundWindow() != hwnd)
+    if (g_PendingSubmitText.empty())
         return;
 
-    SendAltText(text);
+    PostMessage(hwnd, WM_APP_SUBMIT_TEXT, 0, 0);
+}
+
+static void SendSubmitEnter(HWND hwnd) {
+    const UINT scan_code = MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC);
+    const LPARAM keydown_lparam = 1 | (static_cast<LPARAM>(scan_code) << 16);
+    const LPARAM keyup_lparam = keydown_lparam | (1LL << 30) | (1LL << 31);
+
+    CallWindowProc(g_OriginalWndProc, hwnd, WM_KEYDOWN, VK_RETURN, keydown_lparam);
+    CallWindowProc(g_OriginalWndProc, hwnd, WM_KEYUP, VK_RETURN, keyup_lparam);
 }
 
 static LRESULT HandleEnterKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -47,15 +59,17 @@ static LRESULT HandleEnterKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     SetImeEnabled(hwnd, false);
-    SubmitResultText(hwnd);
     g_InputMode = false;
-    return CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
+    g_PendingSubmitOnEnterUp = true;
+    return 0;
 }
 
 static LRESULT HandleEscapeKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     SetImeEnabled(hwnd, false);
     g_InputMode = false;
+    g_PendingSubmitOnEnterUp = false;
     g_LastResultText.clear();
+    g_PendingSubmitText.clear();
     return CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
 }
 
@@ -142,6 +156,21 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (wParam == VK_ESCAPE)
                 return HandleEscapeKey(hwnd, msg, wParam, lParam);
             break;
+        case WM_KEYUP:
+        case WM_SYSKEYUP:
+            if (wParam == VK_RETURN && g_PendingSubmitOnEnterUp) {
+                g_PendingSubmitOnEnterUp = false;
+                QueueSubmitResultText(hwnd);
+                return 0;
+            }
+            break;
+        case WM_APP_SUBMIT_TEXT:
+            if (!g_PendingSubmitText.empty() && GetForegroundWindow() == hwnd) {
+                SendAltText(g_PendingSubmitText);
+                SendSubmitEnter(hwnd);
+            }
+            g_PendingSubmitText.clear();
+            return 0;
         case WM_GETDLGCODE: {
             const auto dlg_code = static_cast<LRESULT>(CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam));
             return dlg_code | DLGC_WANTALLKEYS;
@@ -234,7 +263,9 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
             DetachImeContext();
             g_hWnd = nullptr;
             g_InputMode = false;
+            g_PendingSubmitOnEnterUp = false;
             g_LastResultText.clear();
+            g_PendingSubmitText.clear();
             unregister_addon(hinstDLL);
             break;
         default: break;

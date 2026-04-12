@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <thread>
 #include <chrono>
+#include <vector>
 
 constexpr UINT kGbkCodePage = 936;
 
@@ -76,14 +77,21 @@ bool TryGetGbkAltCode(wchar_t character, unsigned int &code) {
 void SendAltCode(unsigned int code) {
     const std::string digits = std::to_string(code);
 
-    keybd_event(VK_MENU, static_cast<BYTE>(MapVirtualKeyW(VK_MENU, MAPVK_VK_TO_VSC)), 0, 0);
-    for (char digit: digits) {
-        const BYTE numpadVk = static_cast<BYTE>(VK_NUMPAD0 + (digit - '0'));
-        const BYTE scanCode = static_cast<BYTE>(MapVirtualKeyW(numpadVk, MAPVK_VK_TO_VSC));
-        keybd_event(numpadVk, scanCode, 0, 0);
-        keybd_event(numpadVk, scanCode, KEYEVENTF_KEYUP, 0);
+    std::vector<INPUT> inputs;
+    inputs.reserve((digits.size() * 2) + 3);
+
+    inputs.push_back(MakeKeyInput(VK_MENU));
+    for (char digit : digits) {
+        const WORD numpadVk = static_cast<WORD>(VK_NUMPAD0 + (digit - '0'));
+        inputs.push_back(MakeKeyInput(numpadVk));
+        inputs.push_back(MakeKeyInput(numpadVk, KEYEVENTF_KEYUP));
     }
-    keybd_event(VK_MENU, static_cast<BYTE>(MapVirtualKeyW(VK_MENU, MAPVK_VK_TO_VSC)), KEYEVENTF_KEYUP, 0);
+    inputs.push_back(MakeKeyInput(VK_MENU, KEYEVENTF_KEYUP));
+
+    SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+
+    INPUT altUp = MakeKeyInput(VK_MENU, KEYEVENTF_KEYUP);
+    SendInput(1, &altUp, sizeof(INPUT));
     SleepForRange(2, 4);
 }
 
