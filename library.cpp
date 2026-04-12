@@ -100,6 +100,10 @@ static void SetInputMode(HWND hwnd, bool enabled) {
     SetImeEnabled(hwnd, enabled);
 }
 
+static void EnforceImeState(HWND hwnd) {
+    SetImeEnabled(hwnd, g_InputMode);
+}
+
 static void DetachImeContext() {
     if (!g_hWnd)
         return;
@@ -143,6 +147,16 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             return dlg_code | DLGC_WANTALLKEYS;
         }
         case WM_IME_COMPOSITION: {
+            if (!g_InputMode) {
+                HIMC context = ImmGetContext(hwnd);
+                if (context) {
+                    ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+                    ImmReleaseContext(hwnd, context);
+                }
+                SetImeEnabled(hwnd, false);
+                return 0;
+            }
+
             if (GCS_RESULTSTR & lParam) {
                 if (HIMC context = ImmGetContext(hwnd)) {
                     const LONG size = ImmGetCompositionStringW(context, GCS_RESULTSTR, nullptr, 0);
@@ -161,9 +175,19 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             }
             break;
         }
+        case WM_IME_STARTCOMPOSITION:
+            if (!g_InputMode) {
+                EnforceImeState(hwnd);
+                return 0;
+            }
+            break;
+        case WM_IME_SETCONTEXT:
+        case WM_INPUTLANGCHANGE:
+            if (!g_InputMode)
+                EnforceImeState(hwnd);
+            break;
         case WM_SETFOCUS:
-            if (g_InputMode)
-                SetImeEnabled(hwnd, true);
+            EnforceImeState(hwnd);
             break;
         case WM_KILLFOCUS:
             SetImeEnabled(hwnd, false);
