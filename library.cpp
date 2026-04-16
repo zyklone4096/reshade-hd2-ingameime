@@ -126,6 +126,10 @@ static void SetImeEnabled(HWND hwnd, bool enabled) {
 
     ImmSetOpenStatus(context, enabled ? TRUE : FALSE);
     ImmReleaseContext(hwnd, context);
+
+    if (!enabled)
+        ImmAssociateContext(hwnd, nullptr);
+
     g_ImeOpen = enabled;
 }
 
