@@ -106,6 +106,22 @@ void SendAltText(const std::wstring &text) {
     }
 }
 
+std::wstring GetClipboard() {
+    if (!OpenClipboard(nullptr))
+        return L"";
+
+    std::wstring result;
+    if (const auto handle = GetClipboardData(CF_UNICODETEXT)) {
+        if (const auto text = static_cast<const wchar_t *>(GlobalLock(handle))) {
+            result.assign(text);
+            GlobalUnlock(handle);
+        }
+    }
+
+    CloseClipboard();
+    return result;
+}
+
 void SendText(const std::wstring &text) {
     for (wchar_t character : text) {
         if (character == L'\r' || character == L'\n')

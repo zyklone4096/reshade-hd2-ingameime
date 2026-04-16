@@ -7,4 +7,6 @@ void SendText(const std::wstring &text);
 void SendAltCode(unsigned int code);
 void SendAltText(const std::wstring &text);
 
+std::wstring GetClipboard();
+
 #endif //RESHADE_HD2_INGAMEIME_INPUT_H

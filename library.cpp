@@ -6,6 +6,7 @@
 
 #include <reshade.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef NAME
@@ -27,19 +28,31 @@ static bool g_ImeOpen = false;
 static bool g_PendingSubmitOnEnterUp = false;
 static std::wstring g_LastResultText;
 static std::wstring g_PendingSubmitText;
+static bool g_PendingSendEnter = false;
 constexpr UINT WM_APP_SUBMIT_TEXT = WM_APP + 1;
 
 static void SetImeEnabled(HWND hwnd, bool enabled);
 static void SetInputMode(HWND hwnd, bool enabled);
 
-static void QueueSubmitResultText(HWND hwnd) {
-    g_PendingSubmitText = g_LastResultText;
-    g_LastResultText.clear();
+static void QueueTextSubmission(HWND hwnd, std::wstring text, bool sendEnter) {
+    g_PendingSubmitText = std::move(text);
+    g_PendingSendEnter = sendEnter;
 
-    if (g_PendingSubmitText.empty())
+    if (g_PendingSubmitText.empty()) {
+        g_PendingSendEnter = false;
         return;
+    }
 
     PostMessage(hwnd, WM_APP_SUBMIT_TEXT, 0, 0);
+}
+
+static void QueueSubmitResultText(HWND hwnd) {
+    QueueTextSubmission(hwnd, std::move(g_LastResultText), true);
+    g_LastResultText.clear();
+}
+
+static void QueuePasteText(HWND hwnd) {
+    QueueTextSubmission(hwnd, GetClipboard(), false);
 }
 
 static void SendSubmitEnter(HWND hwnd) {
@@ -70,7 +83,14 @@ static LRESULT HandleEscapeKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     g_PendingSubmitOnEnterUp = false;
     g_LastResultText.clear();
     g_PendingSubmitText.clear();
+    g_PendingSendEnter = false;
     return CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
+}
+
+static bool IsPasteShortcut(WPARAM key) {
+    const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    return (key == 'V' && ctrlDown) || (key == VK_INSERT && shiftDown);
 }
 
 static HIMC EnsureImeContext(HWND hwnd) {
@@ -155,6 +175,11 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 
             if (wParam == VK_ESCAPE)
                 return HandleEscapeKey(hwnd, msg, wParam, lParam);
+
+            if (g_InputMode && IsPasteShortcut(wParam)) {
+                QueuePasteText(hwnd);
+                return 0;
+            }
             break;
         case WM_KEYUP:
         case WM_SYSKEYUP:
@@ -166,10 +191,15 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             break;
         case WM_APP_SUBMIT_TEXT:
             if (!g_PendingSubmitText.empty() && GetForegroundWindow() == hwnd) {
-                SendAltText(g_PendingSubmitText);
-                SendSubmitEnter(hwnd);
+                if (g_PendingSendEnter) {
+                    SendAltText(g_PendingSubmitText);
+                    SendSubmitEnter(hwnd);
+                } else {
+                    SendText(g_PendingSubmitText);
+                }
             }
             g_PendingSubmitText.clear();
+            g_PendingSendEnter = false;
             return 0;
         case WM_GETDLGCODE: {
             const auto dlg_code = static_cast<LRESULT>(CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam));
@@ -270,6 +300,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
             g_PendingSubmitOnEnterUp = false;
             g_LastResultText.clear();
             g_PendingSubmitText.clear();
+            g_PendingSendEnter = false;
             unregister_addon(hinstDLL);
             break;
         default: break;
