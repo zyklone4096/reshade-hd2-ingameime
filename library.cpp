@@ -215,6 +215,10 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (!g_InputMode)
                 EnforceImeState(hwnd);
             break;
+        case WM_INPUTLANGCHANGEREQUEST:
+            if (!g_InputMode)
+                return 0;   // reject
+            break;
         case WM_SETFOCUS:
             EnforceImeState(hwnd);
             break;
