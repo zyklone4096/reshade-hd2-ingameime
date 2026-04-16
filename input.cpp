@@ -3,7 +3,6 @@
 #include <windows.h>
 #include <thread>
 #include <chrono>
-#include <vector>
 
 constexpr UINT kGbkCodePage = 936;
 
@@ -30,18 +29,22 @@ void SleepForRange(int minMs, int maxMs) {
 void SendKeyDown(WORD vk) {
     INPUT input = MakeKeyInput(vk);
     SendInput(1, &input, sizeof(INPUT));
-    SleepForRange(1, 2);
+    SleepForRange(3, 5);
 }
 
 void SendKeyUp(WORD vk) {
     INPUT input = MakeKeyInput(vk, KEYEVENTF_KEYUP);
     SendInput(1, &input, sizeof(INPUT));
-    SleepForRange(1, 2);
+    SleepForRange(3, 5);
 }
 
 void SendVirtualKey(WORD vk) {
     SendKeyDown(vk);
     SendKeyUp(vk);
+}
+
+void SendEnterKey() {
+    SendVirtualKey(VK_RETURN);
 }
 
 void SendUnicodeChar(wchar_t character) {
@@ -54,7 +57,7 @@ void SendUnicodeChar(wchar_t character) {
     inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
 
     SendInput(2, inputs, sizeof(INPUT));
-    SleepForRange(1, 2);
+    SleepForRange(5, 8);
 }
 
 bool TryGetGbkAltCode(wchar_t character, unsigned int &code) {
@@ -63,36 +66,26 @@ bool TryGetGbkAltCode(wchar_t character, unsigned int &code) {
     if (gbkSize <= 0)
         return false;
 
-    const unsigned char lead = static_cast<unsigned char>(gbkBytes[0]);
+    const auto lead = static_cast<unsigned char>(gbkBytes[0]);
     if (gbkSize == 1 || lead <= 0x7F) {
         code = lead;
         return true;
     }
 
-    const unsigned char trail = static_cast<unsigned char>(gbkBytes[1]);
+    const auto trail = static_cast<unsigned char>(gbkBytes[1]);
     code = (static_cast<unsigned int>(lead) << 8) | trail;
     return true;
 }
 
 void SendAltCode(unsigned int code) {
     const std::string digits = std::to_string(code);
-
-    std::vector<INPUT> inputs;
-    inputs.reserve((digits.size() * 2) + 3);
-
-    inputs.push_back(MakeKeyInput(VK_MENU));
-    for (char digit : digits) {
+    SendKeyDown(VK_MENU);
+    for (const char digit : digits) {
         const WORD numpadVk = static_cast<WORD>(VK_NUMPAD0 + (digit - '0'));
-        inputs.push_back(MakeKeyInput(numpadVk));
-        inputs.push_back(MakeKeyInput(numpadVk, KEYEVENTF_KEYUP));
+        SendVirtualKey(numpadVk);
     }
-    inputs.push_back(MakeKeyInput(VK_MENU, KEYEVENTF_KEYUP));
-
-    SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
-
-    INPUT altUp = MakeKeyInput(VK_MENU, KEYEVENTF_KEYUP);
-    SendInput(1, &altUp, sizeof(INPUT));
-    SleepForRange(2, 4);
+    SendKeyUp(VK_MENU);
+    SleepForRange(8, 12);
 }
 
 void SendAltText(const std::wstring &text) {

@@ -6,6 +6,7 @@
 void SendText(const std::wstring &text);
 void SendAltCode(unsigned int code);
 void SendAltText(const std::wstring &text);
+void SendEnterKey();
 
 std::wstring GetClipboard();
 

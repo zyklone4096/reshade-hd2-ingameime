@@ -5,6 +5,10 @@
 #include <imm.h>
 
 #include <reshade.hpp>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,22 +30,101 @@ static WNDPROC g_OriginalWndProc = nullptr;
 static bool g_InputMode = false;
 static bool g_ImeOpen = false;
 static bool g_PendingSubmitOnEnterUp = false;
+static bool g_PendingPasteOnShortcutRelease = false;
+static WPARAM g_PendingPasteKey = 0;
+static WPARAM g_PendingPasteModifierKey = 0;
+static bool g_PendingPasteKeyReleased = false;
+static bool g_PendingPasteModifierReleased = false;
+static bool g_RestoreImeAfterPaste = false;
+struct TextSubmission {
+    std::wstring text;
+    bool sendEnter;
+};
+
 static std::wstring g_LastResultText;
-static std::wstring g_PendingSubmitText;
-static bool g_PendingSendEnter = false;
+static std::deque<TextSubmission> g_PendingSubmissions;
+static std::mutex g_SubmissionMutex;
+static std::condition_variable g_SubmissionCv;
+static HANDLE g_SubmissionThread = nullptr;
+static std::atomic<bool> g_StopSubmissionThread = false;
 constexpr UINT WM_APP_SUBMIT_TEXT = WM_APP + 1;
 
 static void SetImeEnabled(HWND hwnd, bool enabled);
 static void SetInputMode(HWND hwnd, bool enabled);
 
-static void QueueTextSubmission(HWND hwnd, std::wstring text, bool sendEnter) {
-    g_PendingSubmitText = std::move(text);
-    g_PendingSendEnter = sendEnter;
+static DWORD WINAPI RunSubmissionWorker(LPVOID) {
+    for (;;) {
+        TextSubmission submission;
+        {
+            std::unique_lock<std::mutex> lock(g_SubmissionMutex);
+            g_SubmissionCv.wait(lock, [] {
+                return g_StopSubmissionThread.load() || !g_PendingSubmissions.empty();
+            });
 
-    if (g_PendingSubmitText.empty()) {
-        g_PendingSendEnter = false;
-        return;
+            if (g_StopSubmissionThread.load())
+                return 0;
+
+            submission = std::move(g_PendingSubmissions.front());
+            g_PendingSubmissions.pop_front();
+        }
+
+        if (submission.text.empty())
+            continue;
+
+        if (GetForegroundWindow() != g_hWnd)
+            continue;
+
+        SendText(submission.text);
+
+        if (!submission.sendEnter && GetForegroundWindow() == g_hWnd)
+            PostMessage(g_hWnd, WM_APP_SUBMIT_TEXT, 1, 0);
+
+        if (submission.sendEnter && GetForegroundWindow() == g_hWnd)
+            SendEnterKey();
     }
+}
+
+static void EnsureSubmissionWorkerRunning() {
+    if (g_SubmissionThread)
+        return;
+
+    g_StopSubmissionThread = false;
+    g_SubmissionThread = CreateThread(nullptr, 0, &RunSubmissionWorker, nullptr, 0, nullptr);
+}
+
+static void CancelTextSubmission() {
+    std::lock_guard<std::mutex> lock(g_SubmissionMutex);
+    g_PendingSubmissions.clear();
+}
+
+static void StopSubmissionWorker() {
+    {
+        std::lock_guard<std::mutex> lock(g_SubmissionMutex);
+        g_PendingSubmissions.clear();
+        g_StopSubmissionThread = true;
+    }
+    g_SubmissionCv.notify_all();
+
+    if (g_SubmissionThread) {
+        WaitForSingleObject(g_SubmissionThread, INFINITE);
+        CloseHandle(g_SubmissionThread);
+        g_SubmissionThread = nullptr;
+    }
+}
+
+static void QueueTextSubmission(HWND hwnd, std::wstring text, bool sendEnter) {
+    if (text.empty())
+        return;
+
+    EnsureSubmissionWorkerRunning();
+
+    {
+        std::lock_guard<std::mutex> lock(g_SubmissionMutex);
+        TextSubmission submission = {std::move(text), sendEnter};
+        g_PendingSubmissions.push_back(std::move(submission));
+    }
+
+    g_SubmissionCv.notify_one();
 
     PostMessage(hwnd, WM_APP_SUBMIT_TEXT, 0, 0);
 }
@@ -52,7 +135,39 @@ static void QueueSubmitResultText(HWND hwnd) {
 }
 
 static void QueuePasteText(HWND hwnd) {
+    g_RestoreImeAfterPaste = g_InputMode;
+    if (g_RestoreImeAfterPaste)
+        SetImeEnabled(hwnd, false);
+
     QueueTextSubmission(hwnd, GetClipboard(), false);
+}
+
+static void ClearPendingPaste() {
+    g_PendingPasteOnShortcutRelease = false;
+    g_PendingPasteKey = 0;
+    g_PendingPasteModifierKey = 0;
+    g_PendingPasteKeyReleased = false;
+    g_PendingPasteModifierReleased = false;
+}
+
+static void BeginPendingPaste(WPARAM key) {
+    g_PendingPasteOnShortcutRelease = true;
+    g_PendingPasteKey = key;
+    g_PendingPasteModifierKey = (key == 'V') ? VK_CONTROL : VK_SHIFT;
+    g_PendingPasteKeyReleased = false;
+    g_PendingPasteModifierReleased = false;
+}
+
+static bool TryQueuePendingPaste(HWND hwnd) {
+    if (!g_PendingPasteOnShortcutRelease)
+        return false;
+
+    if (!g_PendingPasteKeyReleased || !g_PendingPasteModifierReleased)
+        return false;
+
+    ClearPendingPaste();
+    QueuePasteText(hwnd);
+    return true;
 }
 
 static void SendSubmitEnter(HWND hwnd) {
@@ -81,9 +196,9 @@ static LRESULT HandleEscapeKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     SetImeEnabled(hwnd, false);
     g_InputMode = false;
     g_PendingSubmitOnEnterUp = false;
+    ClearPendingPaste();
+    CancelTextSubmission();
     g_LastResultText.clear();
-    g_PendingSubmitText.clear();
-    g_PendingSendEnter = false;
     return CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
 }
 
@@ -181,12 +296,25 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 return HandleEscapeKey(hwnd, msg, wParam, lParam);
 
             if (g_InputMode && IsPasteShortcut(wParam)) {
-                QueuePasteText(hwnd);
+                BeginPendingPaste(wParam);
                 return 0;
             }
             break;
         case WM_KEYUP:
         case WM_SYSKEYUP:
+            if (g_PendingPasteOnShortcutRelease) {
+                if (wParam == g_PendingPasteKey) {
+                    g_PendingPasteKeyReleased = true;
+                    TryQueuePendingPaste(hwnd);
+                    return 0;
+                }
+
+                if (wParam == g_PendingPasteModifierKey)
+                    g_PendingPasteModifierReleased = true;
+
+                TryQueuePendingPaste(hwnd);
+            }
+
             if (wParam == VK_RETURN && g_PendingSubmitOnEnterUp) {
                 g_PendingSubmitOnEnterUp = false;
                 QueueSubmitResultText(hwnd);
@@ -194,16 +322,11 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             }
             break;
         case WM_APP_SUBMIT_TEXT:
-            if (!g_PendingSubmitText.empty() && GetForegroundWindow() == hwnd) {
-                if (g_PendingSendEnter) {
-                    SendAltText(g_PendingSubmitText);
-                    SendSubmitEnter(hwnd);
-                } else {
-                    SendText(g_PendingSubmitText);
-                }
+            if (wParam == 1) {
+                if (g_RestoreImeAfterPaste && g_InputMode)
+                    SetImeEnabled(hwnd, true);
+                g_RestoreImeAfterPaste = false;
             }
-            g_PendingSubmitText.clear();
-            g_PendingSendEnter = false;
             return 0;
         case WM_GETDLGCODE: {
             const auto dlg_code = static_cast<LRESULT>(CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam));
@@ -257,6 +380,9 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             EnforceImeState(hwnd);
             break;
         case WM_KILLFOCUS:
+            ClearPendingPaste();
+            CancelTextSubmission();
+            g_RestoreImeAfterPaste = false;
             SetImeEnabled(hwnd, false);
             break;
         default: break;
@@ -274,6 +400,7 @@ static void OnReshadePresent(reshade::api::effect_runtime *runtime) {
 
     RestoreWindowProc();
     DetachImeContext();
+    CancelTextSubmission();
 
     g_hWnd = hwnd;
     g_OriginalWndProc = reinterpret_cast<WNDPROC>(GetWindowLongPtr(hwnd, GWLP_WNDPROC));
@@ -302,9 +429,10 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
             g_hWnd = nullptr;
             g_InputMode = false;
             g_PendingSubmitOnEnterUp = false;
+            ClearPendingPaste();
+            g_RestoreImeAfterPaste = false;
+            StopSubmissionWorker();
             g_LastResultText.clear();
-            g_PendingSubmitText.clear();
-            g_PendingSendEnter = false;
             unregister_addon(hinstDLL);
             break;
         default: break;
