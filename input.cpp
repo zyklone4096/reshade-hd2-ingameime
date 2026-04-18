@@ -78,6 +78,53 @@ bool TryGetGbkAltCode(wchar_t character, unsigned int &code) {
 }
 
 void SendAltCode(unsigned int code) {
+    INPUT inputs[4] = {};
+    int inputCount = 0;
+
+    const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    const bool winDown = (GetKeyState(VK_LWIN) & 0x8000) != 0 || (GetKeyState(VK_RWIN) & 0x8000) != 0;
+
+    if (ctrlDown) {
+        inputs[inputCount].type = INPUT_KEYBOARD;
+        inputs[inputCount].ki.wVk = VK_CONTROL;
+        inputs[inputCount].ki.dwFlags = KEYEVENTF_KEYUP;
+        inputCount++;
+    }
+    if (shiftDown) {
+        inputs[inputCount].type = INPUT_KEYBOARD;
+        inputs[inputCount].ki.wVk = VK_SHIFT;
+        inputs[inputCount].ki.dwFlags = KEYEVENTF_KEYUP;
+        inputCount++;
+    }
+    if (altDown) {
+        inputs[inputCount].type = INPUT_KEYBOARD;
+        inputs[inputCount].ki.wVk = VK_MENU;
+        inputs[inputCount].ki.dwFlags = KEYEVENTF_KEYUP;
+        inputCount++;
+    }
+    if (winDown) {
+        inputs[inputCount].type = INPUT_KEYBOARD;
+        inputs[inputCount].ki.wVk = VK_LWIN;
+        inputs[inputCount].ki.dwFlags = KEYEVENTF_KEYUP;
+        inputCount++;
+    }
+
+    if (inputCount > 0) {
+        SendInput(inputCount, inputs, sizeof(INPUT));
+        SleepForRange(20, 30);
+    }
+
+    const bool numLockWasOn = (GetKeyState(VK_NUMLOCK) & 0x0001) != 0;
+    if (!numLockWasOn) {
+        INPUT numLockInput = MakeKeyInput(VK_NUMLOCK);
+        SendInput(1, &numLockInput, sizeof(INPUT));
+        INPUT numLockUp = MakeKeyInput(VK_NUMLOCK, KEYEVENTF_KEYUP);
+        SendInput(1, &numLockUp, sizeof(INPUT));
+        SleepForRange(10, 15);
+    }
+
     const std::string digits = std::to_string(code);
     SendKeyDown(VK_MENU);
     for (const char digit : digits) {
@@ -85,6 +132,15 @@ void SendAltCode(unsigned int code) {
         SendVirtualKey(numpadVk);
     }
     SendKeyUp(VK_MENU);
+
+    if (!numLockWasOn) {
+        SleepForRange(5, 10);
+        INPUT numLockInput = MakeKeyInput(VK_NUMLOCK);
+        SendInput(1, &numLockInput, sizeof(INPUT));
+        INPUT numLockUp = MakeKeyInput(VK_NUMLOCK, KEYEVENTF_KEYUP);
+        SendInput(1, &numLockUp, sizeof(INPUT));
+    }
+
     SleepForRange(8, 12);
 }
 
@@ -100,32 +156,30 @@ void SendAltText(const std::wstring &text) {
 }
 
 std::wstring GetClipboard() {
-    if (!OpenClipboard(nullptr))
-        return L"";
-
-    std::wstring result;
-    if (const auto handle = GetClipboardData(CF_UNICODETEXT)) {
-        if (const auto text = static_cast<const wchar_t *>(GlobalLock(handle))) {
-            result.assign(text);
-            GlobalUnlock(handle);
-        }
-    }
-
+    if (!OpenClipboard(nullptr)) return {};
+    HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+    if (!hData) { CloseClipboard(); return {}; }
+    std::wstring result(static_cast<wchar_t*>(GlobalLock(hData)));
+    GlobalUnlock(hData);
     CloseClipboard();
     return result;
 }
 
-void SendText(const std::wstring &text) {
+void SendText(const std::wstring &text, bool useAltCode) {
     for (wchar_t character : text) {
         if (character == L'\r' || character == L'\n')
             continue;
 
-        if (character <= 0x7F)
-            SendUnicodeChar(character);
-        else {
+        if (useAltCode && character > 0x7F) {
             unsigned int code = 0;
             if (TryGetGbkAltCode(character, code))
                 SendAltCode(code);
+        } else {
+            SendUnicodeChar(character);
         }
     }
+}
+
+void SendText(const std::wstring &text) {
+    SendText(text, true);
 }

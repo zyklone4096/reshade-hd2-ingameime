@@ -39,6 +39,7 @@ static bool g_RestoreImeAfterPaste = false;
 struct TextSubmission {
     std::wstring text;
     bool sendEnter;
+    bool useAltCode;
 };
 
 static std::wstring g_LastResultText;
@@ -74,7 +75,7 @@ static DWORD WINAPI RunSubmissionWorker(LPVOID) {
         if (GetForegroundWindow() != g_hWnd)
             continue;
 
-        SendText(submission.text);
+        SendText(submission.text, submission.useAltCode);
 
         if (!submission.sendEnter && GetForegroundWindow() == g_hWnd)
             PostMessage(g_hWnd, WM_APP_SUBMIT_TEXT, 1, 0);
@@ -112,7 +113,7 @@ static void StopSubmissionWorker() {
     }
 }
 
-static void QueueTextSubmission(HWND hwnd, std::wstring text, bool sendEnter) {
+static void QueueTextSubmission(HWND hwnd, std::wstring text, bool sendEnter, bool useAltCode) {
     if (text.empty())
         return;
 
@@ -120,7 +121,7 @@ static void QueueTextSubmission(HWND hwnd, std::wstring text, bool sendEnter) {
 
     {
         std::lock_guard<std::mutex> lock(g_SubmissionMutex);
-        TextSubmission submission = {std::move(text), sendEnter};
+        TextSubmission submission = {std::move(text), sendEnter, useAltCode};
         g_PendingSubmissions.push_back(std::move(submission));
     }
 
@@ -130,7 +131,7 @@ static void QueueTextSubmission(HWND hwnd, std::wstring text, bool sendEnter) {
 }
 
 static void QueueSubmitResultText(HWND hwnd) {
-    QueueTextSubmission(hwnd, std::move(g_LastResultText), true);
+    QueueTextSubmission(hwnd, std::move(g_LastResultText), true, true);
     g_LastResultText.clear();
 }
 
@@ -139,7 +140,7 @@ static void QueuePasteText(HWND hwnd) {
     if (g_RestoreImeAfterPaste)
         SetImeEnabled(hwnd, false);
 
-    QueueTextSubmission(hwnd, GetClipboard(), false);
+    QueueTextSubmission(hwnd, GetClipboard(), false, false);
 }
 
 static void ClearPendingPaste() {
@@ -309,10 +310,11 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                     return 0;
                 }
 
-                if (wParam == g_PendingPasteModifierKey)
+                if (wParam == g_PendingPasteModifierKey) {
                     g_PendingPasteModifierReleased = true;
-
-                TryQueuePendingPaste(hwnd);
+                    if (TryQueuePendingPaste(hwnd))
+                        return 0;
+                }
             }
 
             if (wParam == VK_RETURN && g_PendingSubmitOnEnterUp) {
