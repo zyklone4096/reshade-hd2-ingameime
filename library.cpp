@@ -7,6 +7,7 @@
 #include <reshade.hpp>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -81,7 +82,7 @@ static DWORD WINAPI RunSubmissionWorker(LPVOID) {
             PostMessage(g_hWnd, WM_APP_SUBMIT_TEXT, 1, 0);
 
         if (submission.sendEnter && GetForegroundWindow() == g_hWnd)
-            SendEnterKey();
+            PostMessage(g_hWnd, WM_APP_SUBMIT_TEXT, 2, 0);
     }
 }
 
@@ -209,6 +210,20 @@ static bool IsPasteShortcut(WPARAM key) {
     return (key == 'V' && ctrlDown) || (key == VK_INSERT && shiftDown);
 }
 
+static bool IsSyntheticAltCodeKeyMessage(UINT msg, WPARAM key) {
+    if (msg != WM_KEYDOWN && msg != WM_KEYUP && msg != WM_SYSKEYDOWN && msg != WM_SYSKEYUP)
+        return false;
+
+    if (static_cast<std::uintptr_t>(GetMessageExtraInfo()) != kSyntheticInputExtraInfo)
+        return false;
+
+    return key == VK_MENU || key == VK_LMENU || key == VK_RMENU ||
+           key == VK_CONTROL || key == VK_LCONTROL || key == VK_RCONTROL ||
+           key == VK_SHIFT || key == VK_LSHIFT || key == VK_RSHIFT ||
+           key == VK_LWIN || key == VK_RWIN || key == VK_NUMLOCK ||
+           (key >= VK_NUMPAD0 && key <= VK_NUMPAD9);
+}
+
 static HIMC EnsureImeContext(HWND hwnd) {
     HIMC context = ImmGetContext(hwnd);
     if (context)
@@ -283,6 +298,9 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     if (!(g_hWnd && g_OriginalWndProc))
         return DefWindowProc(hwnd, msg, wParam, lParam);
 
+    if (IsSyntheticAltCodeKeyMessage(msg, wParam))
+        return 0;
+
     switch (msg) {
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
@@ -324,6 +342,12 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             }
             break;
         case WM_APP_SUBMIT_TEXT:
+            if (wParam == 2) {
+                if (GetForegroundWindow() == hwnd)
+                    SendSubmitEnter(hwnd);
+                return 0;
+            }
+
             if (wParam == 1) {
                 if (g_RestoreImeAfterPaste && g_InputMode)
                     SetImeEnabled(hwnd, true);

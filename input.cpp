@@ -11,7 +11,12 @@ INPUT MakeKeyInput(WORD vk, DWORD flags = 0) {
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = vk;
     input.ki.dwFlags = flags;
+    input.ki.dwExtraInfo = static_cast<ULONG_PTR>(kSyntheticInputExtraInfo);
     return input;
+}
+
+void MarkSyntheticInput(INPUT &input) {
+    input.ki.dwExtraInfo = static_cast<ULONG_PTR>(kSyntheticInputExtraInfo);
 }
 
 int GetRandomDelay(int minMs, int maxMs) {
@@ -38,6 +43,16 @@ void SendKeyUp(WORD vk) {
     SleepForRange(3, 5);
 }
 
+void ReleaseAltKeys() {
+    INPUT inputs[3] = {
+        MakeKeyInput(VK_MENU, KEYEVENTF_KEYUP),
+        MakeKeyInput(VK_LMENU, KEYEVENTF_KEYUP),
+        MakeKeyInput(VK_RMENU, KEYEVENTF_KEYUP),
+    };
+    SendInput(3, inputs, sizeof(INPUT));
+    SleepForRange(5, 8);
+}
+
 void SendVirtualKey(WORD vk) {
     SendKeyDown(vk);
     SendKeyUp(vk);
@@ -52,6 +67,7 @@ void SendUnicodeChar(wchar_t character) {
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.wScan = character;
     inputs[0].ki.dwFlags = KEYEVENTF_UNICODE;
+    MarkSyntheticInput(inputs[0]);
 
     inputs[1] = inputs[0];
     inputs[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
@@ -90,24 +106,28 @@ void SendAltCode(unsigned int code) {
         inputs[inputCount].type = INPUT_KEYBOARD;
         inputs[inputCount].ki.wVk = VK_CONTROL;
         inputs[inputCount].ki.dwFlags = KEYEVENTF_KEYUP;
+        MarkSyntheticInput(inputs[inputCount]);
         inputCount++;
     }
     if (shiftDown) {
         inputs[inputCount].type = INPUT_KEYBOARD;
         inputs[inputCount].ki.wVk = VK_SHIFT;
         inputs[inputCount].ki.dwFlags = KEYEVENTF_KEYUP;
+        MarkSyntheticInput(inputs[inputCount]);
         inputCount++;
     }
     if (altDown) {
         inputs[inputCount].type = INPUT_KEYBOARD;
         inputs[inputCount].ki.wVk = VK_MENU;
         inputs[inputCount].ki.dwFlags = KEYEVENTF_KEYUP;
+        MarkSyntheticInput(inputs[inputCount]);
         inputCount++;
     }
     if (winDown) {
         inputs[inputCount].type = INPUT_KEYBOARD;
         inputs[inputCount].ki.wVk = VK_LWIN;
         inputs[inputCount].ki.dwFlags = KEYEVENTF_KEYUP;
+        MarkSyntheticInput(inputs[inputCount]);
         inputCount++;
     }
 
@@ -131,7 +151,7 @@ void SendAltCode(unsigned int code) {
         const WORD numpadVk = static_cast<WORD>(VK_NUMPAD0 + (digit - '0'));
         SendVirtualKey(numpadVk);
     }
-    SendKeyUp(VK_MENU);
+    ReleaseAltKeys();
 
     if (!numLockWasOn) {
         SleepForRange(5, 10);
@@ -142,6 +162,7 @@ void SendAltCode(unsigned int code) {
     }
 
     SleepForRange(8, 12);
+    ReleaseAltKeys();
 }
 
 void SendAltText(const std::wstring &text) {
