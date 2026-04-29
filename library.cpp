@@ -37,6 +37,11 @@ static WPARAM g_PendingPasteModifierKey = 0;
 static bool g_PendingPasteKeyReleased = false;
 static bool g_PendingPasteModifierReleased = false;
 static bool g_RestoreImeAfterPaste = false;
+static HKL g_GameplayKeyboardLayout = nullptr;
+static HKL g_TextKeyboardLayout = nullptr;
+static bool g_ChangingKeyboardLayout = false;
+static bool g_WindowActive = false;
+static bool g_GameplayLayoutActive = false;
 struct TextSubmission {
     std::wstring text;
     bool sendEnter;
@@ -52,7 +57,106 @@ static std::atomic<bool> g_StopSubmissionThread = false;
 constexpr UINT WM_APP_SUBMIT_TEXT = WM_APP + 1;
 
 static void SetImeEnabled(HWND hwnd, bool enabled);
+static void SetImeEnabled(HWND hwnd, bool enabled, bool activateGameplayLayout);
 static void SetInputMode(HWND hwnd, bool enabled);
+
+static HKL GetGameplayKeyboardLayout() {
+    if (!g_GameplayKeyboardLayout)
+        g_GameplayKeyboardLayout = LoadKeyboardLayoutW(L"00000409", KLF_NOTELLSHELL);
+
+    return g_GameplayKeyboardLayout;
+}
+
+static void ActivateKeyboardLayoutForGameplay() {
+    const HKL gameplayLayout = GetGameplayKeyboardLayout();
+    if (!gameplayLayout)
+        return;
+
+    const HKL currentLayout = GetKeyboardLayout(0);
+    if (currentLayout == gameplayLayout) {
+        g_GameplayLayoutActive = true;
+        return;
+    }
+
+    if (!g_GameplayLayoutActive && currentLayout)
+        g_TextKeyboardLayout = currentLayout;
+
+    g_ChangingKeyboardLayout = true;
+    ActivateKeyboardLayout(gameplayLayout, 0);
+    g_ChangingKeyboardLayout = false;
+    g_GameplayLayoutActive = true;
+}
+
+static void RestoreTextKeyboardLayout() {
+    g_GameplayLayoutActive = false;
+
+    if (!g_TextKeyboardLayout)
+        return;
+
+    if (GetKeyboardLayout(0) == g_TextKeyboardLayout)
+        return;
+
+    g_ChangingKeyboardLayout = true;
+    ActivateKeyboardLayout(g_TextKeyboardLayout, 0);
+    g_ChangingKeyboardLayout = false;
+}
+
+static void RestoreKeyboardLayoutForWindow(HWND targetHwnd) {
+    if (!g_TextKeyboardLayout)
+        return;
+
+    if (!targetHwnd)
+        targetHwnd = GetForegroundWindow();
+
+    if (!targetHwnd || targetHwnd == g_hWnd)
+        return;
+
+    const DWORD currentThread = GetCurrentThreadId();
+    const DWORD targetThread = GetWindowThreadProcessId(targetHwnd, nullptr);
+    const bool attached = targetThread != 0 && targetThread != currentThread &&
+                          AttachThreadInput(currentThread, targetThread, TRUE) != FALSE;
+
+    g_ChangingKeyboardLayout = true;
+    ActivateKeyboardLayout(g_TextKeyboardLayout, 0);
+    g_ChangingKeyboardLayout = false;
+
+    if (attached)
+        AttachThreadInput(currentThread, targetThread, FALSE);
+
+    PostMessageW(targetHwnd, WM_INPUTLANGCHANGEREQUEST, 0, reinterpret_cast<LPARAM>(g_TextKeyboardLayout));
+}
+
+static void RestoreLayoutAfterGameplay(HWND targetHwnd) {
+    RestoreTextKeyboardLayout();
+    RestoreKeyboardLayoutForWindow(targetHwnd);
+}
+
+static DWORD WINAPI RestoreLayoutAfterGameplayWorker(LPVOID) {
+    Sleep(50);
+    RestoreKeyboardLayoutForWindow(GetForegroundWindow());
+    Sleep(150);
+    RestoreKeyboardLayoutForWindow(GetForegroundWindow());
+    return 0;
+}
+
+static void ScheduleRestoreLayoutAfterGameplay(HWND targetHwnd) {
+    RestoreLayoutAfterGameplay(targetHwnd);
+
+    HANDLE thread = CreateThread(nullptr, 0, &RestoreLayoutAfterGameplayWorker, nullptr, 0, nullptr);
+    if (thread)
+        CloseHandle(thread);
+}
+
+static void ActivateGameplayLayoutWhenSafe() {
+    ActivateKeyboardLayoutForGameplay();
+}
+
+static bool IsModifierKey(WPARAM key) {
+    return key == VK_SHIFT || key == VK_LSHIFT || key == VK_RSHIFT ||
+           key == VK_CONTROL || key == VK_LCONTROL || key == VK_RCONTROL ||
+           key == VK_MENU || key == VK_LMENU || key == VK_RMENU ||
+           key == VK_LWIN || key == VK_RWIN;
+}
 
 static DWORD WINAPI RunSubmissionWorker(LPVOID) {
     for (;;) {
@@ -181,6 +285,37 @@ static void SendSubmitEnter(HWND hwnd) {
     CallWindowProc(g_OriginalWndProc, hwnd, WM_KEYUP, VK_RETURN, keyup_lparam);
 }
 
+static WPARAM RestoreImeProcessedKey(HWND hwnd, WPARAM key, LPARAM lParam) {
+    if (key != VK_PROCESSKEY)
+        return key;
+
+    const UINT originalKey = ImmGetVirtualKey(hwnd);
+    if (originalKey == 0 || originalKey == VK_PROCESSKEY) {
+        UINT scanCode = (static_cast<UINT>(lParam) >> 16) & 0xFF;
+        if ((lParam & (1UL << 24)) != 0)
+            scanCode |= 0xE000;
+
+        const UINT mappedKey = MapVirtualKeyW(scanCode, MAPVK_VSC_TO_VK_EX);
+        if (mappedKey != 0 && mappedKey != VK_PROCESSKEY)
+            return static_cast<WPARAM>(mappedKey);
+
+        return key;
+    }
+
+    return static_cast<WPARAM>(originalKey);
+}
+
+static void CancelImeComposition(HWND hwnd) {
+    HIMC context = ImmGetContext(hwnd);
+    if (context) {
+        ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+        ImmNotifyIME(context, NI_CLOSECANDIDATE, 0, 0);
+        ImmReleaseContext(hwnd, context);
+    }
+
+    SetImeEnabled(hwnd, false, false);
+}
+
 static LRESULT HandleEnterKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (!g_InputMode) {
         const LRESULT result = CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
@@ -240,8 +375,21 @@ static HIMC EnsureImeContext(HWND hwnd) {
 }
 
 static void SetImeEnabled(HWND hwnd, bool enabled) {
+    SetImeEnabled(hwnd, enabled, true);
+}
+
+static void SetImeEnabled(HWND hwnd, bool enabled, bool activateGameplayLayout) {
+    if (enabled)
+        RestoreTextKeyboardLayout();
+
     HIMC context = enabled ? EnsureImeContext(hwnd) : ImmGetContext(hwnd);
     if (!context) {
+        if (!enabled) {
+            ImmAssociateContext(hwnd, nullptr);
+            ImmAssociateContextEx(hwnd, nullptr, IACE_CHILDREN);
+            if (activateGameplayLayout)
+                ActivateGameplayLayoutWhenSafe();
+        }
         g_ImeOpen = false;
         return;
     }
@@ -258,8 +406,12 @@ static void SetImeEnabled(HWND hwnd, bool enabled) {
     ImmSetOpenStatus(context, enabled ? TRUE : FALSE);
     ImmReleaseContext(hwnd, context);
 
-    if (!enabled)
+    if (!enabled) {
         ImmAssociateContext(hwnd, nullptr);
+        ImmAssociateContextEx(hwnd, nullptr, IACE_CHILDREN);
+        if (activateGameplayLayout)
+            ActivateGameplayLayoutWhenSafe();
+    }
 
     g_ImeOpen = enabled;
 }
@@ -304,6 +456,13 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     switch (msg) {
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
+            if (!g_InputMode) {
+                wParam = RestoreImeProcessedKey(hwnd, wParam, lParam);
+                if (!IsModifierKey(wParam))
+                    ActivateKeyboardLayoutForGameplay();
+                CancelImeComposition(hwnd);
+            }
+
             if ((lParam & (1UL << 30)) != 0)
                 break;
 
@@ -321,6 +480,11 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             break;
         case WM_KEYUP:
         case WM_SYSKEYUP:
+            if (!g_InputMode) {
+                wParam = RestoreImeProcessedKey(hwnd, wParam, lParam);
+                CancelImeComposition(hwnd);
+            }
+
             if (g_PendingPasteOnShortcutRelease) {
                 if (wParam == g_PendingPasteKey) {
                     g_PendingPasteKeyReleased = true;
@@ -360,12 +524,7 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         }
         case WM_IME_COMPOSITION: {
             if (!g_InputMode) {
-                HIMC context = ImmGetContext(hwnd);
-                if (context) {
-                    ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
-                    ImmReleaseContext(hwnd, context);
-                }
-                SetImeEnabled(hwnd, false);
+                CancelImeComposition(hwnd);
                 return 0;
             }
 
@@ -389,27 +548,66 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         }
         case WM_IME_STARTCOMPOSITION:
             if (!g_InputMode) {
-                EnforceImeState(hwnd);
+                CancelImeComposition(hwnd);
+                return 0;
+            }
+            break;
+        case WM_IME_NOTIFY:
+            if (!g_InputMode) {
+                CancelImeComposition(hwnd);
                 return 0;
             }
             break;
         case WM_IME_SETCONTEXT:
         case WM_INPUTLANGCHANGE:
+            if (g_ChangingKeyboardLayout)
+                return 0;
+
             if (!g_InputMode)
-                EnforceImeState(hwnd);
+                return 0;
             break;
         case WM_INPUTLANGCHANGEREQUEST:
-            if (!g_InputMode)
+            if (!g_InputMode) {
+                SetImeEnabled(hwnd, false, false);
                 return 0;   // reject
+            }
+            break;
+        case WM_ACTIVATE:
+            g_WindowActive = LOWORD(wParam) != WA_INACTIVE;
+            if (!g_WindowActive) {
+                SetImeEnabled(hwnd, false, false);
+                ScheduleRestoreLayoutAfterGameplay(reinterpret_cast<HWND>(lParam));
+                break;
+            }
+
+            if (!g_InputMode)
+                CancelImeComposition(hwnd);
+            break;
+        case WM_ACTIVATEAPP:
+            g_WindowActive = wParam != FALSE;
+            if (!g_WindowActive) {
+                SetImeEnabled(hwnd, false, false);
+                ScheduleRestoreLayoutAfterGameplay(GetForegroundWindow());
+                break;
+            }
+
+            if (!g_InputMode)
+                CancelImeComposition(hwnd);
             break;
         case WM_SETFOCUS:
-            EnforceImeState(hwnd);
+            g_WindowActive = true;
+            if (g_InputMode)
+                EnforceImeState(hwnd);
+            else
+                SetImeEnabled(hwnd, false, false);
             break;
         case WM_KILLFOCUS:
+            g_WindowActive = false;
             ClearPendingPaste();
             CancelTextSubmission();
             g_RestoreImeAfterPaste = false;
-            SetImeEnabled(hwnd, false);
+            SetImeEnabled(hwnd, false, false);
+            ScheduleRestoreLayoutAfterGameplay(reinterpret_cast<HWND>(wParam));
             break;
         default: break;
     }
@@ -457,6 +655,10 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
             g_PendingSubmitOnEnterUp = false;
             ClearPendingPaste();
             g_RestoreImeAfterPaste = false;
+            g_TextKeyboardLayout = nullptr;
+            g_ChangingKeyboardLayout = false;
+            g_WindowActive = false;
+            g_GameplayLayoutActive = false;
             StopSubmissionWorker();
             g_LastResultText.clear();
             unregister_addon(hinstDLL);
