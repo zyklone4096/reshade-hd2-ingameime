@@ -30,6 +30,7 @@ static HWND g_hWnd = nullptr;
 static WNDPROC g_OriginalWndProc = nullptr;
 static bool g_InputMode = false;
 static bool g_ImeOpen = false;
+static bool g_PendingInputModeOnEnterUp = false;
 static bool g_PendingSubmitOnEnterUp = false;
 static bool g_PendingPasteOnShortcutRelease = false;
 static WPARAM g_PendingPasteKey = 0;
@@ -174,13 +175,14 @@ static DWORD WINAPI RunSubmissionWorker(LPVOID) {
             g_PendingSubmissions.pop_front();
         }
 
-        if (submission.text.empty())
+        if (submission.text.empty() && !submission.sendEnter)
             continue;
 
         if (GetForegroundWindow() != g_hWnd)
             continue;
 
-        SendText(submission.text, submission.useAltCode);
+        if (!submission.text.empty())
+            SendText(submission.text, submission.useAltCode);
 
         if (!submission.sendEnter && GetForegroundWindow() == g_hWnd)
             PostMessage(g_hWnd, WM_APP_SUBMIT_TEXT, 1, 0);
@@ -219,7 +221,7 @@ static void StopSubmissionWorker() {
 }
 
 static void QueueTextSubmission(HWND hwnd, std::wstring text, bool sendEnter, bool useAltCode) {
-    if (text.empty())
+    if (text.empty() && !sendEnter)
         return;
 
     EnsureSubmissionWorkerRunning();
@@ -318,13 +320,14 @@ static void CancelImeComposition(HWND hwnd) {
 
 static LRESULT HandleEnterKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (!g_InputMode) {
-        const LRESULT result = CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
-        SetInputMode(hwnd, true);
-        return result;
+        g_PendingInputModeOnEnterUp = true;
+        g_LastResultText.clear();
+        return CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
     }
 
     SetImeEnabled(hwnd, false);
     g_InputMode = false;
+    g_PendingInputModeOnEnterUp = false;
     g_PendingSubmitOnEnterUp = true;
     return 0;
 }
@@ -332,6 +335,7 @@ static LRESULT HandleEnterKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 static LRESULT HandleEscapeKey(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     SetImeEnabled(hwnd, false);
     g_InputMode = false;
+    g_PendingInputModeOnEnterUp = false;
     g_PendingSubmitOnEnterUp = false;
     ClearPendingPaste();
     CancelTextSubmission();
@@ -463,6 +467,9 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 CancelImeComposition(hwnd);
             }
 
+            if (wParam == VK_RETURN && g_PendingInputModeOnEnterUp)
+                return 0;
+
             if ((lParam & (1UL << 30)) != 0)
                 break;
 
@@ -483,6 +490,13 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (!g_InputMode) {
                 wParam = RestoreImeProcessedKey(hwnd, wParam, lParam);
                 CancelImeComposition(hwnd);
+            }
+
+            if (wParam == VK_RETURN && g_PendingInputModeOnEnterUp) {
+                g_PendingInputModeOnEnterUp = false;
+                const LRESULT result = CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
+                SetInputMode(hwnd, true);
+                return result;
             }
 
             if (g_PendingPasteOnShortcutRelease) {
@@ -575,6 +589,7 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         case WM_ACTIVATE:
             g_WindowActive = LOWORD(wParam) != WA_INACTIVE;
             if (!g_WindowActive) {
+                g_PendingInputModeOnEnterUp = false;
                 SetImeEnabled(hwnd, false, false);
                 ScheduleRestoreLayoutAfterGameplay(reinterpret_cast<HWND>(lParam));
                 break;
@@ -586,6 +601,7 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         case WM_ACTIVATEAPP:
             g_WindowActive = wParam != FALSE;
             if (!g_WindowActive) {
+                g_PendingInputModeOnEnterUp = false;
                 SetImeEnabled(hwnd, false, false);
                 ScheduleRestoreLayoutAfterGameplay(GetForegroundWindow());
                 break;
@@ -603,6 +619,7 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             break;
         case WM_KILLFOCUS:
             g_WindowActive = false;
+            g_PendingInputModeOnEnterUp = false;
             ClearPendingPaste();
             CancelTextSubmission();
             g_RestoreImeAfterPaste = false;
@@ -652,6 +669,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
             DetachImeContext();
             g_hWnd = nullptr;
             g_InputMode = false;
+            g_PendingInputModeOnEnterUp = false;
             g_PendingSubmitOnEnterUp = false;
             ClearPendingPaste();
             g_RestoreImeAfterPaste = false;
