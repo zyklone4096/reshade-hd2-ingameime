@@ -1,3 +1,5 @@
+# 已死，仅保留解决卡输入法的能力，请等待官方修复或使用 [GRW-CNChat](https://github.com/GameXueRen/GRW-CNChat/)
+
 # ReShade Helldivers2 Ingame IME
 
 《绝地潜兵2》中文输入支持
