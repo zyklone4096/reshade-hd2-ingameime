@@ -1,8 +1,8 @@
-# 已死，仅保留解决卡输入法的能力，请等待官方修复或使用 [GRW-CNChat](https://github.com/GameXueRen/GRW-CNChat/)
+# 已死，仅保留键盘布局锁定和剪贴板粘贴能力，请等待官方修复或使用 [GRW-CNChat](https://github.com/GameXueRen/GRW-CNChat/)
 
-# ReShade Helldivers2 Ingame IME
+# ReShade Helldivers2 Ingame Input Helper
 
-《绝地潜兵2》中文输入支持
+《绝地潜兵2》输入辅助
 
 ## 警告
 
@@ -17,7 +17,7 @@
 2. 从 Releases 下载 `.addon64` 文件，放到游戏目录下的 `bin` 文件夹
 3. 启动游戏
    - 如果正常加载，ReShade 菜单中插件选项卡会显示此插件
-   - 按键与游戏内默认一致
-   - `Enter` 启用输入法，第二次按下时发送消息
-   - `Esc` 关闭输入法，输入法状态不对时按此键可关闭
-   - 输入内容会实时反映到游戏内
+    - 游戏模式下键盘布局锁定为 US，避免游戏快捷键被输入法布局影响
+    - 第一次按下 `Enter` 后进入输入模式，并解除键盘布局锁定
+    - 输入模式下按 `Ctrl+V` 或 `Shift+Insert`，插件会通过 `SendInput` 发送剪贴板中的 Unicode 文本
+    - 输入模式下按 `Enter` 或 `Esc` 会转发给游戏，并退出输入模式
