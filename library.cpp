@@ -26,6 +26,8 @@ HKL g_GameplayKeyboardLayout = nullptr;
 HKL g_TextKeyboardLayout = nullptr;
 bool g_ChangingKeyboardLayout = false;
 bool g_GameplayLayoutActive = false;
+bool g_LayoutEnforcementPosted = false;
+constexpr UINT WM_APP_ENFORCE_GAMEPLAY_LAYOUT = WM_APP + 1;
 
 HKL GetGameplayKeyboardLayout() {
     if (!g_GameplayKeyboardLayout)
@@ -79,6 +81,15 @@ void RestoreLayoutAfterGameplay(HWND targetHwnd) {
     }
 }
 
+void ScheduleGameplayLayoutEnforcement(HWND hwnd) {
+    if (g_InputMode || g_LayoutEnforcementPosted)
+        return;
+
+    g_LayoutEnforcementPosted = true;
+    if (!PostMessageW(hwnd, WM_APP_ENFORCE_GAMEPLAY_LAYOUT, 0, 0))
+        g_LayoutEnforcementPosted = false;
+}
+
 void ClearPendingPaste() {
     g_PendingPaste = false;
     g_PendingPasteKey = 0;
@@ -117,12 +128,12 @@ void EnterInputMode() {
     RestoreTextKeyboardLayout();
 }
 
-void LeaveInputMode() {
+void LeaveInputMode(HWND hwnd) {
     g_InputMode = false;
     g_PendingInputModeOnEnterUp = false;
     g_PendingInputModeOffOnEnterUp = false;
     ClearPendingPaste();
-    ActivateKeyboardLayoutForGameplay();
+    ScheduleGameplayLayoutEnforcement(hwnd);
 }
 
 void RestoreWindowProc() {
@@ -144,7 +155,6 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (!g_InputMode) {
                 if (wParam == VK_RETURN && (lParam & (1UL << 30)) == 0)
                     g_PendingInputModeOnEnterUp = true;
-                ActivateKeyboardLayoutForGameplay();
             } else {
                 if (wParam == VK_RETURN && (lParam & (1UL << 30)) == 0)
                     g_PendingInputModeOffOnEnterUp = true;
@@ -186,13 +196,13 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (wParam == VK_RETURN && g_PendingInputModeOffOnEnterUp) {
                 g_PendingInputModeOffOnEnterUp = false;
                 const LRESULT result = CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
-                LeaveInputMode();
+                LeaveInputMode(hwnd);
                 return result;
             }
 
             if (wParam == VK_ESCAPE && g_InputMode) {
                 const LRESULT result = CallWindowProc(g_OriginalWndProc, hwnd, msg, wParam, lParam);
-                LeaveInputMode();
+                LeaveInputMode(hwnd);
                 return result;
             }
             break;
@@ -201,7 +211,7 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (g_ChangingKeyboardLayout)
                 return 0;
             if (!g_InputMode) {
-                ActivateKeyboardLayoutForGameplay();
+                ScheduleGameplayLayoutEnforcement(hwnd);
                 return 0;
             }
             break;
@@ -221,7 +231,7 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 ClearPendingPaste();
                 RestoreLayoutAfterGameplay(reinterpret_cast<HWND>(lParam));
             } else if (!g_InputMode) {
-                ActivateKeyboardLayoutForGameplay();
+                ScheduleGameplayLayoutEnforcement(hwnd);
             }
             break;
 
@@ -233,7 +243,7 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 ClearPendingPaste();
                 RestoreLayoutAfterGameplay(GetForegroundWindow());
             } else if (!g_InputMode) {
-                ActivateKeyboardLayoutForGameplay();
+                ScheduleGameplayLayoutEnforcement(hwnd);
             }
             break;
 
@@ -241,8 +251,14 @@ LRESULT CALLBACK ReplaceWindowFunc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (g_InputMode)
                 RestoreTextKeyboardLayout();
             else
-                ActivateKeyboardLayoutForGameplay();
+                ScheduleGameplayLayoutEnforcement(hwnd);
             break;
+
+        case WM_APP_ENFORCE_GAMEPLAY_LAYOUT:
+            g_LayoutEnforcementPosted = false;
+            if (!g_InputMode)
+                ActivateKeyboardLayoutForGameplay();
+            return 0;
 
         case WM_KILLFOCUS:
             g_InputMode = false;
@@ -298,6 +314,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
             g_TextKeyboardLayout = nullptr;
             g_ChangingKeyboardLayout = false;
             g_GameplayLayoutActive = false;
+            g_LayoutEnforcementPosted = false;
             unregister_addon(hinstDLL);
             break;
 
